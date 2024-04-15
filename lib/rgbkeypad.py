@@ -31,69 +31,73 @@ Notes
 
 """
 
+from typing import Callable
+
 import time
 import board
 import busio
-from random import randint
-from digitalio import DigitalInOut, Direction, Pull
-from adafruit_bus_device.i2c_device import I2CDevice
-import adafruit_dotstar
 
+from digitalio import DigitalInOut, Direction
+from adafruit_bus_device.i2c_device import I2CDevice
+from adafruit_dotstar import DotStar
 
 NUM_KEYS = 16
-
-# These are the 16 switches on keypad, with their value.
-_PINS = [2**i for i in range(NUM_KEYS)]
-
-
-class RgbKeypad(object):
-    """
-    Represents a keypad and hence a set of Key instances with
-    associated LEDs and key behaviours.
+DEFAULT_BRIGHTNESS = 0.05
+ENABLE_SLEEP = True
 
 
-    """
+class RGBKeyPad():
+    """Represents the keypad and hence a set of Key instances"""
     def __init__(self):
-        self.pins = _PINS
+
+        # Device setup
         self.cs = DigitalInOut(board.GP17)
         self.cs.direction = Direction.OUTPUT
         self.cs.value = 0
-
-        self.pixels = adafruit_dotstar.DotStar(board.GP18, board.GP19, 16, brightness=0.1, auto_write=True)
-
+        self.pixels = DotStar(board.GP18, board.GP19, 16, brightness=DEFAULT_BRIGHTNESS, auto_write=True)
         i2c = busio.I2C(board.GP5, board.GP4)
-        self.expander = I2CDevice(i2c, 0x20)
-
-        self.keys = []
+        self.device = I2CDevice(i2c, 0x20)
+    
+        # Variables
+        self.states = [0] *16
         self.time_of_last_press = time.monotonic()
         self.time_since_last_press = None
-        self.led_sleep_enabled = False
-        self.led_sleep_time = 60
+        self.last_led_states = None
+
+        # Sleep variables
+        self.led_sleep_enabled = True
+        self.led_sleep_time = 1
         self.sleeping = False
         self.was_asleep = False
-        self.last_led_states = None
-        # self.rotation = 0
-        self.full_state = [0]
-        for i in range(len(self.pins)):
-            _key = Key(i, self.pins[i], self.pixels, self.full_state)
-            self.keys.append(_key)
+
+        # Initialises & attaches the indiviual keys
+        self.keys = [Key(i, self.pixels, self.states[i]) for i in range(NUM_KEYS)]
 
     def update(self):
-        # Call this in each iteration of your while loop to update
-        # to update everything's state, e.g. `keybow.update()`
+        """Updates the state of the keypad and all of its keys.
+        
+        Call this in each iteration of your while loop to update"""
 
-        with self.expander:
-            self.expander.write(bytes([0x0]))
+        with self.device:
+            self.device.write(bytes([0x0]))
             result = bytearray(2)
-            self.expander.readinto(result)
-            self.full_state[0] = result[0] | result[1] << 8
+            self.device.readinto(result)
+            all_states = result[0] | result[1] << 8
+            for i in range(0,16):
+                if not (1 << i) & all_states:
+                    self.states[i] = 1
+                else:
+                    self.states[i] = 0
 
-            # print("u", self.full_state[0])
         for _key in self.keys:
             _key.update()
 
-        # Used to work out the sleep behaviour, by keeping track
-        # of the time of the last key press.
+        if ENABLE_SLEEP:
+            self.sleep_handler()
+
+
+    def sleep_handler(self):
+        """Handles the sleep behaviour of the keypad."""
         if self.any_pressed():
             self.time_of_last_press = time.monotonic()
             self.sleeping = False
@@ -104,7 +108,7 @@ class RgbKeypad(object):
         # has elapsed to engage sleep. If engaged, record the state of the
         # LEDs, so it can be restored on wake.
         if self.led_sleep_enabled and not self.sleeping:
-            if time.monotonic() - self.time_of_last_press > self.led_sleep_time:
+            if self.time_since_last_press > self.led_sleep_time:
                 self.sleeping = True
                 self.last_led_states = [k.rgb if k.lit else [0, 0, 0] for k in self.keys]
                 self.set_all(0, 0, 0)
@@ -112,17 +116,17 @@ class RgbKeypad(object):
 
         # If it was sleeping, but is no longer, then restore LED states.
         if not self.sleeping and self.was_asleep:
-            for k in range(len(self.keys)):
+            for k in range(NUM_KEYS):
                 self.keys[k].set_led(*self.last_led_states[k])
             self.was_asleep = False
 
     def set_led(self, number, r, g, b):
-        # Set an individual key's LED to an RGB value by its number.
+        """Set an individual key's LED to an RGB value by its number."""
 
         self.keys[number].set_led(r, g, b)
 
     def set_all(self, r, g, b):
-        # Set all of Keybow's LEDs to an RGB value.
+        """Sets all of the keypad's LEDs to an RGB value"""
 
         if not self.sleeping:
             for _key in self.keys:
@@ -131,65 +135,53 @@ class RgbKeypad(object):
             for _key in self.keys:
                 _key.led_off()
 
-    def random_colors(self, x_range=3, y_range=3):
-        for x in range(x_range):
-            for y in range(y_range):
-                i = x * 4 + y
-                self.keys[i].set_led(randint(0, 255), randint(0, 255), randint(0, 255))
-
     def clear_all(self):
+        """Turns off all of the keypad's LEDs"""
         for _key in self.keys:
             _key.led_off()
 
-    def get_states(self):
-        # Returns a Boolean list of Keybow's key states
-        # (0=not pressed, 1=pressed).
-
-        _states = [_key.state for _key in self.keys]
+    def get_states(self) -> list[bool]:
+        """Get the states of all the keys on the keypad.
+        
+        Returns a list of the key states (0=not pressed, 1=pressed)"""
+        _states = [_key.key_state for _key in self.keys]
         return _states
 
-    def get_pressed(self):
-        # Returns a list of key numbers currently pressed.
+    def get_pressed(self)-> list[int]:
+        """Returns a list of key numbers currently pressed"""
 
-        _pressed = [_key.number for _key in self.keys if _key.state]
+        _pressed = [_key.number for _key in self.keys if _key.key_state]
         return _pressed
 
-    def any_pressed(self):
-        # Returns True if any key is pressed, False if none are pressed.
+    def any_pressed(self) -> bool:
+        """Returns True if any key is pressed, False if none are pressed."""
 
-        if any(self.get_states()):
-            return True
-        else:
-            return False
+        return any(self.get_states())
 
     def none_pressed(self):
-        # Returns True if none of the keys are pressed, False is any key
-        # is pressed.
-
-        if not any(self.get_states()):
-            return True
-        else:
-            return False
+        """Returns True if none of the keys are pressed, False is any key is pressed."""
+        return not any(self.get_states())
 
     @staticmethod
-    def on_press(_key, handler=None):
-        # Attaches a press function to a key, via a decorator. This is stored as
-        # `key.press_function` in the key's attributes, and run if necessary
-        # as part of the key's update function (and hence Keybow's update
-        # function). It can be attached as follows:
+    def on_press(_key, state:str = 'default', handler=None):
+        """Attaches a press function to a key, via a decorator.
+        
+        This is stored as `key.press_function` in the key's attributes, and runs if triggered.
+        
+        It can be attached as follows:
 
-        # @keybow.on_press(key)
-        # def press_handler(key, pressed):
-        #     if pressed:
-        #         do something
-        #     else:
-        #         do something else
+            @RGBKeyPad.on_press(key, state='state_name')
+            def press_handler(key):
+                do something
 
+        The `state` parameter is optional and can be used to specify a state string that will change
+        what press function is attached given the state.
+        """
         if _key is None:
             return
 
         def attach_handler(a_handler):
-            _key.press_function = a_handler
+            _key.press_functions[state] = a_handler
 
         if handler is not None:
             attach_handler(handler)
@@ -197,21 +189,21 @@ class RgbKeypad(object):
             return attach_handler
 
     @staticmethod
-    def on_release(_key, handler=None):
-        # Attaches a release function to a key, via a decorator. This is stored
-        # as `key.release_function` in the key's attributes, and run if
-        # necessary as part of the key's update function (and hence Keybow's
-        # update function). It can be attached as follows:
+    def on_release(_key, state:str = 'default', handler=None):
+        """Attaches a release function to a key, via a decorator.
+        
+        This is stored as `key.release_function` in the key's attributes, and runs if triggered.
 
-        # @keybow.on_release(key)
-        # def release_handler(key):
-        #     do something
+        @RGBKeyPad.on_release(key, state='state_name')
+        def release_handler(key):
+            do something
+        """
 
         if _key is None:
             return
 
         def attach_handler(a_handler):
-            _key.release_function = a_handler
+            _key.release_functions[state] = a_handler
 
         if handler is not None:
             attach_handler(handler)
@@ -219,21 +211,21 @@ class RgbKeypad(object):
             return attach_handler
 
     @staticmethod
-    def on_hold(_key, handler=None):
-        # Attaches a hold unction to a key, via a decorator. This is stored as
-        # `key.hold_function` in the key's attributes, and run if necessary
-        # as part of the key's update function (and hence Keybow's update
-        # function). It can be attached as follows:
+    def on_hold(_key, state:str = 'default', handler=None):
+        """Attaches a hold function to a key, via a decorator.
+        
+        This is stored as `key.hold_function` in the key's attributes, and runs if triggered.
 
-        # @keybow.on_hold(key)
-        # def hold_handler(key):
-        #     do something
+        @RGBKeyPad.on_release(key, state='state_name') 
+        def hold_handler(key):
+            do something
+        """
 
         if _key is None:
             return
 
         def attach_handler(a_handler):
-            _key.hold_function = a_handler
+            _key.hold_functions[state] = a_handler
 
         if handler is not None:
             attach_handler(handler)
@@ -242,21 +234,19 @@ class RgbKeypad(object):
 
 
 class Key:
-    """
-    Represents a key on Keypad, with associated value and
-    LED behaviours.
+    """Represents a key on Keypad.
 
-    :param number: the key number (0-15) to associate with the key
-    :param mask: the value when pressed (2**key number)
+    :param number: the unique key number (0-15) to associate with the key
     :param pixels: the dotstar instance for the LEDs
-    :param full_state: a list of the keypad full keys state (int)
+    :param current_state: the current state of the key (0 or 1)
+    :param board_state: the state of the board (default or other)
     """
-    def __init__(self, number, mask, pixels, full_state):
-        self.mask = mask
+    def __init__(self, number: int, pixels: DotStar, key_state: bool, board_state: str = 'default'):
         self.number = number
-        self.full_state = full_state
-
-        self.state = 0
+        self.pixels = pixels
+        self.current_state = key_state
+        self.board_state = board_state
+        self.key_state = 0
         self.pressed = 0
         self.last_state = None
         self.time_of_last_press = time.monotonic()
@@ -269,49 +259,43 @@ class Key:
         self.lit = False
         self.xy = self.get_xy()
         self.x, self.y = self.xy
-        self.pixels = pixels
         self.led_off()
-        self.press_function = None
-        self.release_function = None
-        self.hold_function = None
+        self.press_functions: dict[str, Callable] = {'default': None}
+        self.release_functions: dict[str, Callable]= {'default': None}
+        self.hold_functions:dict[str, Callable] = {'default': None}
         self.press_func_fired = False
         self.hold_func_fired = False
         self.debounce = 0.125
         self.key_locked = False
 
-    def get_state(self):
-        # Returns the state of the key (0=not pressed, 1=pressed).
-        res = 0 if self.full_state[0] & self.mask else 1
-        return res
 
     def update(self):
-        # Updates the state of the key and updates all of its
-        # attributes.
+        """Updates the state of the key and all of its attributes."""
 
         self.time_since_last_press = time.monotonic() - self.time_of_last_press
 
-        # Keys get locked during the debounce time.
+        # Keys get locked during the debounce time. This is to prevent rapid key presses.
         if self.time_since_last_press < self.debounce:
             self.key_locked = True
         else:
             self.key_locked = False
 
-        self.state = self.get_state()
-        self.pressed = self.state
+        self.key_state = self.current_state
+        self.pressed = self.key_state
         update_time = time.monotonic()
 
         # If there's a `press_function` attached, then call it,
         # returning the key object and the pressed state.
-        if self.press_function is not None and self.pressed and not self.press_func_fired and not self.key_locked:
-            self.press_function(self)
+        if self.press_functions is not None and self.pressed and not self.press_func_fired and not self.key_locked:
+            self.press_functions[self.board_state](self)
             self.press_func_fired = True
             # time.sleep(0.05)  # A little debounce
 
         # If the key has been pressed and releases, then call
         # the `release_function`, if one is attached.
         if not self.pressed and self.last_state:
-            if self.release_function is not None:
-                self.release_function(self)
+            if self.release_functions is not None:
+                self.release_functions[self.board_state](self)
             self.last_state = False
             self.press_func_fired = False
 
@@ -336,8 +320,8 @@ class Key:
         # ensures that the function is only called once.
         if self.time_held_for > self.hold_time:
             self.held = True
-            if self.hold_function is not None and not self.hold_func_fired:
-                self.hold_function(self)
+            if self.hold_functions is not None and not self.hold_func_fired:
+                self.hold_functions[self.board_state](self)
                 self.hold_func_fired = True
         else:
             self.held = False
@@ -410,7 +394,7 @@ class Key:
 
     def __str__(self):
         # When printed, show the key's state (0 or 1).
-        return self.state
+        return self.key_state
 
 
 def xy_to_number(x, y):
@@ -450,4 +434,4 @@ def hsv_to_rgb(h, s, v):
 
     rgb = tuple(int(c * 255) for c in rgb)
 
-    return rgb
+    return rgb   
